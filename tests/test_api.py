@@ -7,16 +7,25 @@ import app.main as main
 
 
 class FakeClient:
-    def get_tenant_device_infos(self, page_size, page, text_search, type):
-        devices = [
+    def __init__(self):
+        self.devices = [
             SimpleNamespace(id=SimpleNamespace(id="d1"), name="meter-A1", type="A"),
             SimpleNamespace(id=SimpleNamespace(id="d2"), name="meter-B1", type="B"),
         ]
+
+    def get_tenant_device_infos(self, page_size, page, text_search, type):
+        devices = self.devices
         if type:
             devices = [d for d in devices if d.type == type]
         if text_search:
             devices = [d for d in devices if text_search in d.name]
         return SimpleNamespace(data=devices)
+
+    def get_device_by_id(self, device_id):
+        for device in self.devices:
+            if device.id.id == device_id:
+                return device
+        raise ValueError("not found")
 
 
 @contextmanager
@@ -54,3 +63,23 @@ def test_batch_rpc(monkeypatch):
     data = resp.json()
     assert data["matched_count"] == 2
     assert data["success_count"] == 2
+
+
+def test_batch_rpc_by_device_ids(monkeypatch):
+    monkeypatch.setattr(main, "tb_client", fake_tb_client)
+    monkeypatch.setattr(main, "send_rpc", lambda *args, **kwargs: {"ok": True})
+    client = TestClient(main.app)
+
+    resp = client.post(
+        "/rpc/batch",
+        json={
+            "device_ids": ["d2"],
+            "method": "reboot",
+            "params": {},
+        },
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["matched_count"] == 1
+    assert data["results"][0]["device_id"] == "d2"

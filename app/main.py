@@ -3,8 +3,12 @@ from contextlib import contextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from tb_rest_client.rest_client_ce import RestClientCE
+
+load_dotenv()
 
 
 class DeviceSummary(BaseModel):
@@ -22,6 +26,7 @@ class DeviceSearchRequest(BaseModel):
 
 
 class RpcBatchRequest(BaseModel):
+    device_ids: list[str] | None = Field(default=None, description="设备ID列表，可与筛选条件组合")
     device_types: list[str] | None = Field(default=None, description="设备类型列表，可为空")
     name_contains: str | None = Field(default=None, description="设备名称包含关键字")
     one_way: bool = Field(default=False, description="是否单向RPC")
@@ -99,6 +104,17 @@ def fetch_devices(
     return [_to_summary(device) for device in page_data.data]
 
 
+def fetch_devices_by_ids(client: RestClientCE, device_ids: list[str]) -> list[DeviceSummary]:
+    devices: list[DeviceSummary] = []
+    for device_id in device_ids:
+        if hasattr(client, "get_device_by_id"):
+            device = client.get_device_by_id(device_id)
+        else:
+            device = client.get_device(device_id)
+        devices.append(_to_summary(device))
+    return devices
+
+
 def send_rpc(client: RestClientCE, *, device_id: str, req: RpcBatchRequest) -> Any:
     payload = {"method": req.method, "params": req.params}
     if req.one_way:
@@ -114,6 +130,14 @@ def send_rpc(client: RestClientCE, *, device_id: str, req: RpcBatchRequest) -> A
 
 def create_app() -> FastAPI:
     app = FastAPI(title="ThingsBoard Batch RPC API", version="1.0.0")
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.get("/devices/search", response_model=list[DeviceSummary], summary="按类型+名称片段查询设备")
     def search_devices(req: DeviceSearchRequest = Depends()):
@@ -131,6 +155,10 @@ def create_app() -> FastAPI:
         with tb_client() as client:
             all_devices: dict[str, DeviceSummary] = {}
 
+            if req.device_ids:
+                for device in fetch_devices_by_ids(client, req.device_ids):
+                    all_devices[device.id] = device
+
             if req.device_types:
                 for device_type in req.device_types:
                     devices = fetch_devices(
@@ -142,7 +170,7 @@ def create_app() -> FastAPI:
                     )
                     for device in devices:
                         all_devices[device.id] = device
-            else:
+            elif not req.device_ids:
                 devices = fetch_devices(
                     client,
                     page_size=1000,
