@@ -1,14 +1,21 @@
+import logging
 import os
 from contextlib import contextmanager
 from typing import Any
 
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from tb_rest_client.rest_client_ce import RestClientCE
 
 load_dotenv()
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+)
+logger = logging.getLogger("tb_batch_rpc_api")
 
 
 class DeviceSummary(BaseModel):
@@ -57,21 +64,26 @@ def tb_client() -> RestClientCE:
     password = os.getenv("TB_PASSWORD")
 
     if not all([base_url, username, password]):
+        logger.error("missing TB config env vars")
         raise HTTPException(status_code=500, detail="ThingsBoard 配置缺失，请设置 TB_BASE_URL/TB_USERNAME/TB_PASSWORD")
 
+    logger.info("initializing ThingsBoard client, base_url=%s", base_url)
     client = RestClientCE(base_url=base_url)
     try:
         client.login(username=username, password=password)
+        logger.info("ThingsBoard login success, username=%s", username)
         yield client
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
+        logger.exception("ThingsBoard client call failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"ThingsBoard 调用失败: {exc}") from exc
     finally:
         try:
             client.logout()
+            logger.info("ThingsBoard logout success")
         except Exception:  # noqa: BLE001
-            pass
+            logger.warning("ThingsBoard logout failed", exc_info=True)
 
 
 def _device_id_str(device: Any) -> str:
@@ -95,16 +107,26 @@ def fetch_devices(
     device_type: str | None,
     name_contains: str | None,
 ) -> list[DeviceSummary]:
+    logger.info(
+        "fetch devices by filter: page_size=%s page=%s device_type=%s name_contains=%s",
+        page_size,
+        page,
+        device_type,
+        name_contains,
+    )
     page_data = client.get_tenant_device_infos(
         page_size=page_size,
         page=page,
         text_search=name_contains,
         type=device_type,
     )
-    return [_to_summary(device) for device in page_data.data]
+    devices = [_to_summary(device) for device in page_data.data]
+    logger.info("fetch devices done, count=%s", len(devices))
+    return devices
 
 
 def fetch_devices_by_ids(client: RestClientCE, device_ids: list[str]) -> list[DeviceSummary]:
+    logger.info("fetch devices by ids, count=%s", len(device_ids))
     devices: list[DeviceSummary] = []
     for device_id in device_ids:
         if hasattr(client, "get_device_by_id"):
@@ -112,20 +134,29 @@ def fetch_devices_by_ids(client: RestClientCE, device_ids: list[str]) -> list[De
         else:
             device = client.get_device(device_id)
         devices.append(_to_summary(device))
+    logger.info("fetch devices by ids done, hit=%s", len(devices))
     return devices
 
 
 def send_rpc(client: RestClientCE, *, device_id: str, req: RpcBatchRequest) -> Any:
     payload = {"method": req.method, "params": req.params}
+    logger.info("send rpc start: device_id=%s one_way=%s method=%s", device_id, req.one_way, req.method)
+
     if req.one_way:
         if hasattr(client, "handle_one_way_device_rpc_request"):
-            return client.handle_one_way_device_rpc_request(device_id=device_id, request_body=payload)
-        return client.post(f"/api/plugins/rpc/oneway/{device_id}", payload)
+            resp = client.handle_one_way_device_rpc_request(device_id=device_id, request_body=payload)
+        else:
+            resp = client.post(f"/api/plugins/rpc/oneway/{device_id}", payload)
+        logger.info("send one-way rpc success: device_id=%s", device_id)
+        return resp
 
     payload["timeout"] = req.timeout
     if hasattr(client, "handle_two_way_device_rpc_request"):
-        return client.handle_two_way_device_rpc_request(device_id=device_id, request_body=payload)
-    return client.post(f"/api/plugins/rpc/twoway/{device_id}", payload)
+        resp = client.handle_two_way_device_rpc_request(device_id=device_id, request_body=payload)
+    else:
+        resp = client.post(f"/api/plugins/rpc/twoway/{device_id}", payload)
+    logger.info("send two-way rpc success: device_id=%s", device_id)
+    return resp
 
 
 def create_app() -> FastAPI:
@@ -141,17 +172,28 @@ def create_app() -> FastAPI:
 
     @app.get("/devices/search", response_model=list[DeviceSummary], summary="按类型+名称片段查询设备")
     def search_devices(req: DeviceSearchRequest = Depends()):
+        logger.info("HTTP GET /devices/search called")
         with tb_client() as client:
-            return fetch_devices(
+            devices = fetch_devices(
                 client,
                 page_size=req.page_size,
                 page=req.page,
                 device_type=req.device_type,
                 name_contains=req.name_contains,
             )
+            logger.info("HTTP GET /devices/search completed, count=%s", len(devices))
+            return devices
 
     @app.post("/rpc/batch", response_model=RpcBatchResponse, summary="批量下发RPC")
     def batch_rpc(req: RpcBatchRequest):
+        logger.info(
+            "HTTP POST /rpc/batch called: ids=%s types=%s name_contains=%s method=%s one_way=%s",
+            len(req.device_ids or []),
+            len(req.device_types or []),
+            req.name_contains,
+            req.method,
+            req.one_way,
+        )
         with tb_client() as client:
             all_devices: dict[str, DeviceSummary] = {}
 
@@ -181,6 +223,7 @@ def create_app() -> FastAPI:
                 for device in devices:
                     all_devices[device.id] = device
 
+            logger.info("batch rpc matched devices=%s", len(all_devices))
             results: list[RpcResult] = []
             for device in all_devices.values():
                 try:
@@ -194,6 +237,7 @@ def create_app() -> FastAPI:
                         )
                     )
                 except Exception as exc:  # noqa: BLE001
+                    logger.exception("send rpc failed: device_id=%s error=%s", device.id, exc)
                     results.append(
                         RpcResult(
                             device_id=device.id,
@@ -204,12 +248,19 @@ def create_app() -> FastAPI:
                     )
 
             success_count = sum(1 for result in results if result.success)
-            return RpcBatchResponse(
+            resp = RpcBatchResponse(
                 matched_count=len(results),
                 success_count=success_count,
                 failed_count=len(results) - success_count,
                 results=results,
             )
+            logger.info(
+                "HTTP POST /rpc/batch completed: matched=%s success=%s failed=%s",
+                resp.matched_count,
+                resp.success_count,
+                resp.failed_count,
+            )
+            return resp
 
     return app
 

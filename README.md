@@ -19,6 +19,7 @@ pip install -r requirements.txt
 TB_BASE_URL=http://127.0.0.1:8080
 TB_USERNAME=tenant@thingsboard.org
 TB_PASSWORD=tenant
+LOG_LEVEL=INFO
 ```
 
 ## 运行
@@ -72,3 +73,8 @@ curl "http://127.0.0.1:8000/devices/search?device_type=Thermostat&name_contains=
 - `device_types` 可省略，为空时按 `name_contains` 在全部类型中检索；
 - 当 `device_ids` 与筛选条件同时存在时，结果会合并去重后批量下发；
 - `one_way=true` 走单向 RPC；否则走双向 RPC。
+
+
+## 日志
+
+系统已在主要节点输出日志（登录、查询、批量下发、异常、登出），可通过 `.env` 中 `LOG_LEVEL` 调整级别。
