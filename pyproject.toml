@@ -12,4 +12,5 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "tb-rest-client>=4.3",
     "uvicorn>=0.41.0",
+    "websockets>=16.0",
 ]
