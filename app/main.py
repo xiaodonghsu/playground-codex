@@ -144,7 +144,7 @@ def send_rpc(client: RestClientCE, *, device_id: str, req: RpcBatchRequest) -> A
 
     if req.one_way:
         if hasattr(client, "handle_one_way_device_rpc_request"):
-            resp = client.handle_one_way_device_rpc_request(device_id=device_id, request_body=payload)
+            resp = client.handle_one_way_device_rpc_request(device_id=device_id, body=payload)
         else:
             resp = client.post(f"/api/plugins/rpc/oneway/{device_id}", payload)
         logger.info("send one-way rpc success: device_id=%s", device_id)
@@ -152,7 +152,7 @@ def send_rpc(client: RestClientCE, *, device_id: str, req: RpcBatchRequest) -> A
 
     payload["timeout"] = req.timeout
     if hasattr(client, "handle_two_way_device_rpc_request"):
-        resp = client.handle_two_way_device_rpc_request(device_id=device_id, request_body=payload)
+        resp = client.handle_two_way_device_rpc_request(device_id=device_id, body=payload)
     else:
         resp = client.post(f"/api/plugins/rpc/twoway/{device_id}", payload)
     logger.info("send two-way rpc success: device_id=%s", device_id)
